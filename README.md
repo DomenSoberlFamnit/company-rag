@@ -23,6 +23,11 @@ Browser ──► Open WebUI :3000 ──► Ollama :11434 (internal)
 - **Recommended:** NVIDIA GPU with 8 GB+ VRAM, plus the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html). CPU-only works, but answers will be slow.
 - About 15 GB of disk for images and models, plus space for your documents
 
+## Installation guides
+
+- [Arch Linux](INSTALL-ARCH.md)
+- [Fedora Server](INSTALL-FEDORA.md)
+
 ## Quick start
 
 ```bash
