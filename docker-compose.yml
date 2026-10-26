@@ -1,0 +1,130 @@
+name: company-rag
+
+services:
+  # ---------------------------------------------------------------------------
+  # Ollama – serves the Qwen chat model and the BGE-M3 embedding model.
+  # Not published on the host; only reachable on the internal network.
+  # ---------------------------------------------------------------------------
+  ollama:
+    image: ollama/ollama:${OLLAMA_VERSION:-latest}
+    container_name: rag-ollama
+    restart: unless-stopped
+    volumes:
+      - ollama-data:/root/.ollama
+    environment:
+      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-24h}
+      OLLAMA_CONTEXT_LENGTH: ${OLLAMA_CONTEXT_LENGTH:-16384}
+      OLLAMA_NUM_PARALLEL: ${OLLAMA_NUM_PARALLEL:-2}
+      # Chat model + embedding model resident at the same time
+      OLLAMA_MAX_LOADED_MODELS: ${OLLAMA_MAX_LOADED_MODELS:-2}
+      OLLAMA_FLASH_ATTENTION: "1"
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+    networks:
+      - rag
+
+  # ---------------------------------------------------------------------------
+  # One-shot job: pull the models into the Ollama volume, then exit.
+  # Re-running is cheap – already downloaded layers are skipped.
+  # ---------------------------------------------------------------------------
+  model-init:
+    image: ollama/ollama:${OLLAMA_VERSION:-latest}
+    container_name: rag-model-init
+    restart: "no"
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      CHAT_MODEL: ${CHAT_MODEL:-qwen3:8b}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-bge-m3}
+    entrypoint: ["/bin/sh", "/scripts/pull-models.sh"]
+    volumes:
+      - ./scripts/pull-models.sh:/scripts/pull-models.sh:ro
+    networks:
+      - rag
+
+  # ---------------------------------------------------------------------------
+  # Open WebUI – chat frontend, user management, document upload & RAG.
+  # ---------------------------------------------------------------------------
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:${OPEN_WEBUI_VERSION:-main}
+    container_name: rag-open-webui
+    restart: unless-stopped
+    depends_on:
+      ollama:
+        condition: service_healthy
+      model-init:
+        condition: service_completed_successfully
+    ports:
+      - "${WEBUI_BIND_ADDRESS:-127.0.0.1}:${WEBUI_PORT:-3000}:8080"
+    volumes:
+      - open-webui-data:/app/backend/data
+    environment:
+      # --- General -----------------------------------------------------------
+      WEBUI_NAME: ${WEBUI_NAME:-Company Assistant}
+      WEBUI_URL: ${WEBUI_URL:-http://localhost:3000}
+      WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY:?Set WEBUI_SECRET_KEY in .env}
+      # The first account created becomes admin. Later sign-ups wait for
+      # admin approval.
+      ENABLE_SIGNUP: ${ENABLE_SIGNUP:-true}
+      DEFAULT_USER_ROLE: ${DEFAULT_USER_ROLE:-pending}
+      ENABLE_COMMUNITY_SHARING: "false"
+      # Keep the server offline-friendly: no OpenAI connection, no telemetry
+      ENABLE_OPENAI_API: "false"
+      SCARF_NO_ANALYTICS: "true"
+      DO_NOT_TRACK: "true"
+      ANONYMIZED_TELEMETRY: "false"
+
+      # --- LLM (Qwen via Ollama) ---------------------------------------------
+      ENABLE_OLLAMA_API: "true"
+      OLLAMA_BASE_URL: http://ollama:11434
+      DEFAULT_MODELS: ${CHAT_MODEL:-qwen3:8b}
+      # Use the same model for titles, tags and query generation
+      TASK_MODEL: ${CHAT_MODEL:-qwen3:8b}
+
+      # --- Embeddings (BGE-M3 via Ollama) ------------------------------------
+      RAG_EMBEDDING_ENGINE: ollama
+      RAG_EMBEDDING_MODEL: ${EMBEDDING_MODEL:-bge-m3}
+      RAG_OLLAMA_BASE_URL: http://ollama:11434
+      RAG_EMBEDDING_BATCH_SIZE: ${RAG_EMBEDDING_BATCH_SIZE:-16}
+
+      # --- Retrieval ---------------------------------------------------------
+      VECTOR_DB: chroma
+      CONTENT_EXTRACTION_ENGINE: ${CONTENT_EXTRACTION_ENGINE:-}
+      PDF_EXTRACT_IMAGES: ${PDF_EXTRACT_IMAGES:-false}
+      CHUNK_SIZE: ${CHUNK_SIZE:-1000}
+      CHUNK_OVERLAP: ${CHUNK_OVERLAP:-200}
+      RAG_TOP_K: ${RAG_TOP_K:-6}
+      # Hybrid search = BM25 keyword search + vector search, then reranking
+      ENABLE_RAG_HYBRID_SEARCH: ${ENABLE_RAG_HYBRID_SEARCH:-true}
+      RAG_RERANKING_MODEL: ${RAG_RERANKING_MODEL:-BAAI/bge-reranker-v2-m3}
+      RAG_TOP_K_RERANKER: ${RAG_TOP_K_RERANKER:-4}
+      RAG_RELEVANCE_THRESHOLD: ${RAG_RELEVANCE_THRESHOLD:-0.0}
+
+      # --- Uploads -----------------------------------------------------------
+      RAG_FILE_MAX_SIZE: ${RAG_FILE_MAX_SIZE:-100}   # MB per file
+      RAG_FILE_MAX_COUNT: ${RAG_FILE_MAX_COUNT:-20}  # files per upload
+      # Allow regular users to create their own knowledge bases. Admin can
+      # still change this per group in Admin Panel > Users > Groups.
+      USER_PERMISSIONS_WORKSPACE_KNOWLEDGE_ACCESS: ${USER_KNOWLEDGE_ACCESS:-true}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+    networks:
+      - rag
+
+volumes:
+  ollama-data:
+  open-webui-data:
+
+networks:
+  rag:
+    driver: bridge
